@@ -13,9 +13,21 @@ return [
     'webhook_secret' => env('TELEGRAM_WEBHOOK_SECRET'),
 
     /*
-    | Optional chat id (user or group) to receive plain-text order summaries.
+    | Chat id(s) for order alerts (comma-separated extra list or use single id alone).
+    | Example private user id: "123456789" — group/channel: "-1001234567890"
     */
-    'orders_notify_chat_id' => env('TELEGRAM_ORDERS_NOTIFY_CHAT_ID'),
+    'orders_notify_chat_ids' => array_values(array_unique(array_filter(
+        preg_split(
+            '/\s*,\s*/',
+            implode(',', array_filter([
+                trim((string) env('TELEGRAM_ORDERS_NOTIFY_CHAT_ID', '')),
+                trim((string) env('TELEGRAM_ORDERS_NOTIFY_CHAT_IDS', '')),
+            ], static fn (string $s): bool => $s !== '')),
+            -1,
+            PREG_SPLIT_NO_EMPTY,
+        ),
+        static fn (string $id): bool => $id !== ''
+    ))),
 
     'bots' => [
         'mybot' => [

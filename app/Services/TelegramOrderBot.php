@@ -23,6 +23,8 @@ class TelegramOrderBot
 
     private const BTN_HELP = 'Help';
 
+    private const BTN_PLACE_ORDER = 'Place order';
+
     public function __construct(
         private readonly CheckoutOrderService $checkoutOrderService,
     ) {}
@@ -67,11 +69,12 @@ class TelegramOrderBot
             return;
         }
 
-        if (preg_match('/^\/(help|menu|cart|orders|clear)$/i', $text, $m)) {
+        if (preg_match('/^\/(help|menu|cart|orders|clear|checkout)$/i', $text, $m)) {
             match (strtolower($m[1])) {
                 'help' => $this->sendHelp($chatId),
                 'menu' => $this->sendBrowseMenuFresh($chatId, 0),
                 'cart' => $this->sendCartSummary($chatId, $user),
+                'checkout' => $this->checkoutFromKeyboard($chatId, $user),
                 'orders' => $this->sendOrderHistory($chatId, $user),
                 'clear' => $this->clearCartReply($chatId, $user),
             };
@@ -86,6 +89,7 @@ class TelegramOrderBot
             strtolower(self::BTN_CLEAR) => $this->clearCartReply($chatId, $user),
             strtolower(self::BTN_ORDERS) => $this->sendOrderHistory($chatId, $user),
             strtolower(self::BTN_HELP) => $this->sendHelp($chatId),
+            strtolower(self::BTN_PLACE_ORDER) => $this->checkoutFromKeyboard($chatId, $user),
             default => Telegram::sendMessage([
                 'chat_id' => $chatId,
                 'text' => 'Use the menu buttons or tap /help for commands.',
@@ -135,6 +139,13 @@ class TelegramOrderBot
             return;
         }
 
+        if ($data === 'vc') {
+            $user->refresh();
+            $this->sendCartSummary($chatId, $user);
+
+            return;
+        }
+
         try {
             if (preg_match('/^l:(\d+)$/', $data, $m)) {
                 $this->editProductList($chatId, (int) $messageId, (int) $m[1]);
@@ -178,12 +189,11 @@ class TelegramOrderBot
             }
 
             if ($data === 'cf') {
-                $order = $this->checkoutOrderService->checkout($user);
-                $this->notifyStaff($order);
+                $order = $this->checkoutAndAlertStaff($user);
                 $this->safeEditMessage(
                     $chatId,
                     (int) $messageId,
-                    'Order #'.$order->id.' received. Total: '.$this->fmtMoney((string) $order->total)."\nThank you — we will confirm shortly.",
+                    $this->orderConfirmedText($order),
                     ['inline_keyboard' => []]
                 );
                 Telegram::sendMessage([
@@ -215,8 +225,13 @@ class TelegramOrderBot
 
     private function notifyStaff(Order $order): void
     {
-        $chatId = config('telegram.orders_notify_chat_id');
-        if ($chatId === null || $chatId === '') {
+        $chatIds = config('telegram.orders_notify_chat_ids', []);
+        if (! is_array($chatIds) || $chatIds === []) {
+            Log::warning('telegram_orders_notify_skipped', [
+                'reason' => 'no TELEGRAM_ORDERS_NOTIFY_CHAT_ID / TELEGRAM_ORDERS_NOTIFY_CHAT_IDS configured',
+                'order_id' => $order->id,
+            ]);
+
             return;
         }
 
@@ -231,17 +246,69 @@ class TelegramOrderBot
         $who = ($order->telegramUser->name ?? 'Customer')
             .' (@'.($order->telegramUser->username ?? 'none').')';
 
-        $text = "Order #{$order->id} — {$who}\n"
-            ."Total {$this->fmtMoney((string) $order->total)}\n\n"
+        $text = "NEW ORDER #{$order->id}\n{$who}\n"
+            .'Total '.$this->fmtMoney((string) $order->total)."\n\n"
             .implode("\n", $lines);
 
+        foreach ($chatIds as $notifyChatId) {
+            try {
+                Telegram::sendMessage([
+                    'chat_id' => $notifyChatId,
+                    'text' => $text,
+                ]);
+            } catch (Throwable $e) {
+                Log::warning('telegram_staff_notify_failed', [
+                    'message' => $e->getMessage(),
+                    'chat_id' => $notifyChatId,
+                    'order_id' => $order->id,
+                ]);
+            }
+        }
+    }
+
+    /** @throws InvalidArgumentException */
+    private function checkoutAndAlertStaff(TelegramUser $customer): Order
+    {
+        $order = $this->checkoutOrderService->checkout($customer);
+        $this->notifyStaff($order);
+
+        return $order->fresh(['items.product', 'telegramUser']);
+    }
+
+    private function orderConfirmedText(Order $order): string
+    {
+        return 'Order #'.$order->id.' received. Total: '.$this->fmtMoney((string) $order->total)."\n"
+            .'Thank you — we will confirm shortly.';
+    }
+
+    private function checkoutFromKeyboard(string $chatId, TelegramUser $user): void
+    {
+        $user->refresh();
+
         try {
+            $order = $this->checkoutAndAlertStaff($user);
+
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => $text,
+                'text' => $this->orderConfirmedText($order),
+                'reply_markup' => $this->replyKeyboardMarkup(),
+            ]);
+        } catch (InvalidArgumentException $e) {
+            Telegram::sendMessage([
+                'chat_id' => $chatId,
+                'text' => $e->getMessage(),
+                'reply_markup' => $this->replyKeyboardMarkup(),
             ]);
         } catch (Throwable $e) {
-            Log::warning('telegram_staff_notify_failed', ['message' => $e->getMessage()]);
+            Log::error('telegram_order_checkout_keyboard', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            Telegram::sendMessage([
+                'chat_id' => $chatId,
+                'text' => 'Could not complete the order right now. Please try again shortly.',
+                'reply_markup' => $this->replyKeyboardMarkup(),
+            ]);
         }
     }
 
@@ -258,7 +325,9 @@ class TelegramOrderBot
     {
         Telegram::sendMessage([
             'chat_id' => $chatId,
-            'text' => "Welcome! Order here through this chat.\n\nTap «".self::BTN_BROWSE.'» below to pick items, '.self::BTN_CART.' to review checkout, or '.self::BTN_HELP.' anytime.',
+            'text' => "Welcome! Order here through this chat.\n\nTap «".self::BTN_BROWSE.'» to shop, '
+                .self::BTN_PLACE_ORDER.' when you are ready, or '
+                .self::BTN_CART.' to review lines first.',
             'reply_markup' => $this->replyKeyboardMarkup(),
         ]);
     }
@@ -270,7 +339,8 @@ class TelegramOrderBot
             'text' => implode("\n", [
                 '/start — home & keyboard',
                 '/menu — open the catalogue',
-                '/cart — cart & place order',
+                '/cart — show cart',
+                '/checkout — '.self::BTN_PLACE_ORDER.' (keyboard has the same button)',
                 '/orders — your recent orders',
                 '/clear — empty cart',
                 '/help — this message',
@@ -356,10 +426,8 @@ class TelegramOrderBot
             ];
         }
 
-        $rows[] = [
-            ['text' => 'Place order', 'callback_data' => 'cf'],
-            ['text' => 'Clear cart', 'callback_data' => 'cl'],
-        ];
+        $rows[] = [['text' => self::BTN_PLACE_ORDER, 'callback_data' => 'cf']];
+        $rows[] = [['text' => 'Clear cart', 'callback_data' => 'cl']];
 
         return $rows;
     }
@@ -396,7 +464,8 @@ class TelegramOrderBot
             return 'Your cart had only unavailable items — it was refreshed. Open '.self::BTN_BROWSE.'.';
         }
 
-        return "Your cart\n\n".implode("\n", $chunks)."\n\nSubtotal: ".$this->fmtMoney($subtotal);
+        return "Your cart\n\n".implode("\n", $chunks)."\n\nSubtotal: ".$this->fmtMoney($subtotal)
+            ."\n\nTap «".self::BTN_PLACE_ORDER.'» here or on your keyboard.';
     }
 
     private function sendOrderHistory(string $chatId, TelegramUser $user): void
@@ -455,6 +524,7 @@ class TelegramOrderBot
         $keyboard = [
             [['text' => 'Add (+1)', 'callback_data' => 'a:'.$productId]],
             [['text' => 'Remove (−1)', 'callback_data' => 'r:'.$productId]],
+            [['text' => 'View cart · '.self::BTN_PLACE_ORDER, 'callback_data' => 'vc']],
             [['text' => 'Back to menu', 'callback_data' => 'l:'.$page]],
         ];
 
@@ -483,6 +553,7 @@ class TelegramOrderBot
         $keyboard = [
             [['text' => 'Add (+1)', 'callback_data' => 'a:'.$productId]],
             [['text' => 'Remove (−1)', 'callback_data' => 'r:'.$productId]],
+            [['text' => 'View cart · '.self::BTN_PLACE_ORDER, 'callback_data' => 'vc']],
             [['text' => 'Back to menu', 'callback_data' => 'l:'.$page]],
         ];
 
@@ -573,6 +644,8 @@ class TelegramOrderBot
             $rows[] = $navRow;
         }
 
+        $rows[] = [['text' => 'View cart · '.self::BTN_PLACE_ORDER, 'callback_data' => 'vc']];
+
         return $rows;
     }
 
@@ -634,6 +707,7 @@ class TelegramOrderBot
             'keyboard' => [
                 [['text' => self::BTN_BROWSE]],
                 [['text' => self::BTN_CART], ['text' => self::BTN_CLEAR]],
+                [['text' => self::BTN_PLACE_ORDER]],
                 [['text' => self::BTN_ORDERS], ['text' => self::BTN_HELP]],
             ],
             'resize_keyboard' => true,
