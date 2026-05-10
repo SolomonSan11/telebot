@@ -69,6 +69,18 @@ class TelegramOrderBot
             return;
         }
 
+        if (preg_match('/^\/myid$/i', $text)) {
+            Telegram::sendMessage([
+                'chat_id' => $chatId,
+                'text' => 'Your Telegram id (use in .env as TELEGRAM_ORDERS_NOTIFY_CHAT_ID or TELEGRAM_ADMIN_USER_IDS): '
+                    .'<code>'.$from->id.'</code>',
+                'parse_mode' => 'HTML',
+                'reply_markup' => $this->replyKeyboardMarkup(),
+            ]);
+
+            return;
+        }
+
         if (preg_match('/^\/(help|menu|cart|orders|clear|checkout)$/i', $text, $m)) {
             match (strtolower($m[1])) {
                 'help' => $this->sendHelp($chatId),
@@ -106,7 +118,7 @@ class TelegramOrderBot
         ]);
         $name = $nameParts !== [] ? implode(' ', $nameParts) : null;
 
-        return TelegramUser::query()->firstOrCreate(
+        $user = TelegramUser::query()->firstOrCreate(
             ['telegram_id' => $from->id],
             [
                 'name' => $name,
@@ -114,6 +126,16 @@ class TelegramOrderBot
                 'shopping_cart' => [],
             ],
         );
+
+        $user->forceFill([
+            'name' => $name,
+            'username' => $from->username ?? null,
+        ]);
+        if ($user->isDirty()) {
+            $user->save();
+        }
+
+        return $user;
     }
 
     private function handleCallback(string $callbackQueryId, $from, $message, string $data): void
@@ -230,28 +252,90 @@ class TelegramOrderBot
     }
 
     /**
-     * Staff alert: supports TELEGRAM_ORDERS_* chat ids; if unset, falls back to admin ids or @admin usernames.
+     * Who receives NEW ORDER Telegram alerts: explicit notify ids + admin ids + usernames.
+     * Usernames resolve to numeric chat ids via telegram_users (after that person has messaged the bot) or getChat(@handle).
      */
     private function orderAlertRecipientChatIds(): array
     {
-        $primary = config('telegram.orders_notify_chat_ids', []);
-        if (is_array($primary) && $primary !== []) {
-            return $primary;
+        $seen = [];
+        $out = [];
+
+        $push = function ($id) use (&$seen, &$out): void {
+            $k = trim((string) $id);
+            if ($k === '' || isset($seen[$k])) {
+                return;
+            }
+            $seen[$k] = true;
+            $out[] = $id;
+        };
+
+        foreach (config('telegram.orders_notify_chat_ids', []) as $id) {
+            $push($id);
         }
 
-        $adminIds = config('telegram.admin_user_ids', []);
-        if (is_array($adminIds) && $adminIds !== []) {
-            return $adminIds;
+        foreach (config('telegram.admin_user_ids', []) as $id) {
+            $push($id);
         }
 
-        $handles = [];
         foreach (config('telegram.admin_usernames', []) as $u) {
-            if ($u !== '') {
-                $handles[] = '@'.$u;
+            if ($u === '') {
+                continue;
+            }
+            $match = TelegramUser::query()
+                ->whereRaw('LOWER(username) = ?', [mb_strtolower($u)])
+                ->value('telegram_id');
+            if ($match !== null) {
+                $push((string) $match);
+
+                continue;
+            }
+            $push('@'.$u);
+        }
+
+        return $out;
+    }
+
+    /**
+     * Telegram accepts integer chat ids for DMs; @username is unreliable. Prefer DB or getChat().
+     *
+     * @return string|int
+     */
+    private function resolveOrderNotifyChatTarget(string|int $raw): string|int
+    {
+        $s = trim((string) $raw);
+
+        if ($s === '') {
+            return $raw;
+        }
+
+        if (preg_match('/^-?\d+$/', $s)) {
+            return strlen($s) >= 12 ? $s : (int) $s;
+        }
+
+        if (str_starts_with(mb_strtolower($s), '@')) {
+            $handle = ltrim($s, '@');
+            $fromDb = TelegramUser::query()
+                ->whereRaw('LOWER(username) = ?', [mb_strtolower($handle)])
+                ->value('telegram_id');
+            if ($fromDb !== null) {
+                return (string) $fromDb;
+            }
+
+            try {
+                $chat = Telegram::getChat(['chat_id' => $s]);
+
+                return $chat->id;
+            } catch (Throwable $e) {
+                Log::notice('telegram_getchat_resolve_failed', [
+                    'chat' => $s,
+                    'message' => $e->getMessage(),
+                ]);
+
+                return $s;
             }
         }
 
-        return $handles;
+        return $raw;
     }
 
     private function telegramUserIsStaff($from): bool
@@ -407,16 +491,23 @@ class TelegramOrderBot
 
         foreach ($chatIds as $notifyChatId) {
             try {
+                $target = $this->resolveOrderNotifyChatTarget($notifyChatId);
                 Telegram::sendMessage([
-                    'chat_id' => $notifyChatId,
+                    'chat_id' => $target,
                     'text' => $text,
                     'reply_markup' => $markup,
+                ]);
+                Log::info('telegram_order_alert_sent', [
+                    'order_id' => $order->id,
+                    'to_raw' => $notifyChatId,
+                    'to_resolved' => $target,
                 ]);
             } catch (Throwable $e) {
                 Log::warning('telegram_staff_notify_failed', [
                     'message' => $e->getMessage(),
-                    'chat_id' => $notifyChatId,
+                    'chat_id_raw' => $notifyChatId,
                     'order_id' => $order->id,
+                    'hint' => 'Staff must open the bot once (/start). Set TELEGRAM_ORDERS_NOTIFY_CHAT_ID to your numeric id from /myid, or ensure TELEGRAM_ADMIN_USERNAMES matches your Telegram username.',
                 ]);
             }
         }
@@ -497,6 +588,7 @@ class TelegramOrderBot
                 '/menu — open the catalogue',
                 '/cart — show cart',
                 '/checkout — '.self::BTN_PLACE_ORDER.' (keyboard has the same button)',
+                '/myid — show your numeric Telegram id (for staff alerts in .env)',
                 '/orders — your recent orders',
                 '/clear — empty cart',
                 '/help — this message',
