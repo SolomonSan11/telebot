@@ -29,6 +29,26 @@ return [
         static fn (string $id): bool => $id !== ''
     ))),
 
+    /*
+    | Who may tap buttons on staff order alerts (e.g. "On the way"). Comma-separated.
+    | Usernames without @ — case-insensitive. Optional numeric user ids are stricter (recommended).
+    */
+    'admin_usernames' => array_values(array_filter(
+        array_map(
+            static fn (string $s): string => strtolower(ltrim(trim($s), '@')),
+            preg_split('/\s*,\s*/', (string) env('TELEGRAM_ADMIN_USERNAMES', ''), -1, PREG_SPLIT_NO_EMPTY)
+        ),
+        static fn (string $u): bool => $u !== ''
+    )),
+
+    'admin_user_ids' => array_values(array_unique(array_filter(
+        array_map(
+            static fn (string $s): int => (int) trim($s),
+            preg_split('/\s*,\s*/', (string) env('TELEGRAM_ADMIN_USER_IDS', ''), -1, PREG_SPLIT_NO_EMPTY)
+        ),
+        static fn (int $id): bool => $id > 0
+    ))),
+
     'bots' => [
         'mybot' => [
             'token' => env('TELEGRAM_BOT_TOKEN', 'YOUR-BOT-TOKEN'),

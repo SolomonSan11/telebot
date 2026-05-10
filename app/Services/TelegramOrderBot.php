@@ -118,6 +118,12 @@ class TelegramOrderBot
 
     private function handleCallback(string $callbackQueryId, $from, $message, string $data): void
     {
+        if (preg_match('/^tw:(\d+)$/', $data, $m)) {
+            $this->handleAdminOrderOnTheWay($callbackQueryId, $from, $message, (int) $m[1]);
+
+            return;
+        }
+
         $this->answerCallback($callbackQueryId);
 
         if (! $message || ! $from || ($from->isBot ?? false)) {
@@ -223,12 +229,154 @@ class TelegramOrderBot
         }
     }
 
+    /**
+     * Staff alert: supports TELEGRAM_ORDERS_* chat ids; if unset, falls back to admin ids or @admin usernames.
+     */
+    private function orderAlertRecipientChatIds(): array
+    {
+        $primary = config('telegram.orders_notify_chat_ids', []);
+        if (is_array($primary) && $primary !== []) {
+            return $primary;
+        }
+
+        $adminIds = config('telegram.admin_user_ids', []);
+        if (is_array($adminIds) && $adminIds !== []) {
+            return $adminIds;
+        }
+
+        $handles = [];
+        foreach (config('telegram.admin_usernames', []) as $u) {
+            if ($u !== '') {
+                $handles[] = '@'.$u;
+            }
+        }
+
+        return $handles;
+    }
+
+    private function telegramUserIsStaff($from): bool
+    {
+        if (! $from || ($from->isBot ?? false)) {
+            return false;
+        }
+
+        foreach (config('telegram.admin_user_ids', []) as $id) {
+            if ((int) $from->id === (int) $id) {
+                return true;
+            }
+        }
+
+        $un = strtolower((string) ($from->username ?? ''));
+
+        return $un !== '' && in_array($un, config('telegram.admin_usernames', []), true);
+    }
+
+    private function handleAdminOrderOnTheWay(string $callbackQueryId, $from, $message, int $orderId): void
+    {
+        if (! $message) {
+            return;
+        }
+
+        if (! $this->telegramUserIsStaff($from)) {
+            try {
+                Telegram::answerCallbackQuery([
+                    'callback_query_id' => $callbackQueryId,
+                    'text' => 'Only staff can confirm delivery status.',
+                    'show_alert' => true,
+                ]);
+            } catch (Throwable $e) {
+                Log::notice('telegram_answer_callback_failed', ['message' => $e->getMessage()]);
+            }
+
+            return;
+        }
+
+        $order = Order::query()->with('telegramUser')->find($orderId);
+        if (! $order || ! $order->telegramUser) {
+            try {
+                Telegram::answerCallbackQuery([
+                    'callback_query_id' => $callbackQueryId,
+                    'text' => 'Order not found.',
+                    'show_alert' => true,
+                ]);
+            } catch (Throwable $e) {
+                Log::notice('telegram_answer_callback_failed', ['message' => $e->getMessage()]);
+            }
+
+            return;
+        }
+
+        if ($order->status !== 'pending') {
+            try {
+                Telegram::answerCallbackQuery([
+                    'callback_query_id' => $callbackQueryId,
+                    'text' => 'This order was already marked ('.$order->status.').',
+                    'show_alert' => true,
+                ]);
+            } catch (Throwable $e) {
+                Log::notice('telegram_answer_callback_failed', ['message' => $e->getMessage()]);
+            }
+
+            return;
+        }
+
+        $order->update(['status' => 'on_the_way']);
+
+        $customerChatId = (string) $order->telegramUser->telegram_id;
+        $customerText = 'Good news — your order #'.$order->id.' is on the way. '
+            .'Total '.$this->fmtMoney((string) $order->total).'. Thank you for your order!';
+
+        $customerReachable = true;
+
+        try {
+            Telegram::sendMessage([
+                'chat_id' => $customerChatId,
+                'text' => $customerText,
+            ]);
+        } catch (Throwable $e) {
+            $customerReachable = false;
+            Log::warning('telegram_customer_on_the_way_failed', [
+                'message' => $e->getMessage(),
+                'order_id' => $order->id,
+                'telegram_user_id' => $order->telegram_user_id,
+            ]);
+        }
+
+        try {
+            Telegram::answerCallbackQuery([
+                'callback_query_id' => $callbackQueryId,
+                'text' => $customerReachable ? 'Customer notified' : 'Saved — customer message could not be delivered.',
+                'show_alert' => ! $customerReachable,
+            ]);
+        } catch (Throwable $e) {
+            Log::notice('telegram_answer_callback_failed', ['message' => $e->getMessage()]);
+        }
+
+        $adminChatId = (string) $message->chat->id;
+        $messageId = (int) $message->messageId;
+        $original = (string) ($message->text ?? '');
+        $suffix = $customerReachable
+            ? "\n\n✅ On the way — customer has been notified."
+            : "\n\n⚠️ Marked on the way — could not DM the customer (blocked bot or stopped chat).";
+
+        try {
+            Telegram::editMessageText([
+                'chat_id' => $adminChatId,
+                'message_id' => $messageId,
+                'text' => $original.$suffix,
+                'reply_markup' => json_encode(['inline_keyboard' => []], JSON_THROW_ON_ERROR),
+            ]);
+        } catch (Throwable $e) {
+            Log::notice('telegram_staff_edit_after_dispatch_failed', ['message' => $e->getMessage()]);
+        }
+    }
+
     private function notifyStaff(Order $order): void
     {
-        $chatIds = config('telegram.orders_notify_chat_ids', []);
-        if (! is_array($chatIds) || $chatIds === []) {
+        $chatIds = $this->orderAlertRecipientChatIds();
+        if ($chatIds === []) {
             Log::warning('telegram_orders_notify_skipped', [
-                'reason' => 'no TELEGRAM_ORDERS_NOTIFY_CHAT_ID / TELEGRAM_ORDERS_NOTIFY_CHAT_IDS configured',
+                'reason' => 'no notify chat ids and no TELEGRAM_ADMIN_USERNAMES / TELEGRAM_ADMIN_USER_IDS',
                 'order_id' => $order->id,
             ]);
 
@@ -248,13 +396,21 @@ class TelegramOrderBot
 
         $text = "NEW ORDER #{$order->id}\n{$who}\n"
             .'Total '.$this->fmtMoney((string) $order->total)."\n\n"
-            .implode("\n", $lines);
+            .implode("\n", $lines)
+            ."\n\nTap when the order leaves:";
+
+        $markup = json_encode([
+            'inline_keyboard' => [
+                [['text' => '🛵 On the way (notify customer)', 'callback_data' => 'tw:'.$order->id]],
+            ],
+        ], JSON_THROW_ON_ERROR);
 
         foreach ($chatIds as $notifyChatId) {
             try {
                 Telegram::sendMessage([
                     'chat_id' => $notifyChatId,
                     'text' => $text,
+                    'reply_markup' => $markup,
                 ]);
             } catch (Throwable $e) {
                 Log::warning('telegram_staff_notify_failed', [
