@@ -2,33 +2,27 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\TelegramOrderBot;
 use Illuminate\Http\Request;
-use Telegram\Bot\Laravel\Facades\Telegram;
+use Illuminate\Support\Facades\Log;
+use Telegram\Bot\Objects\Update;
+use Throwable;
 
 class TelegramController extends Controller
 {
-    public function webhook()
+    public function webhook(Request $request, TelegramOrderBot $bot)
     {
-        $update = Telegram::getWebhookUpdate();
+        $data = json_decode($request->getContent(), true);
+        if (! is_array($data)) {
+            return response()->json(['ok' => true]);
+        }
 
-        $message = $update->getMessage();
-
-        if (!$message)
-            return response()->json();
-
-        $chatId = $message->getChat()->getId();
-        $text = $message->getText();
-
-        if ($text === '/start') {
-            Telegram::sendMessage([
-                'chat_id' => $chatId,
-                'text' => "Welcome to ordering bot",
-                'reply_markup' => json_encode([
-                    'keyboard' => [
-                        [['text' => 'Browse Menu']]
-                    ],
-                    'resize_keyboard' => true
-                ])
+        try {
+            $bot->handle(new Update($data));
+        } catch (Throwable $e) {
+            Log::error('telegram_webhook_failed', [
+                'message' => $e->getMessage(),
+                'exception' => $e::class,
             ]);
         }
 
