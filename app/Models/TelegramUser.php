@@ -94,7 +94,7 @@ class TelegramUser extends Model
             unset($lines[$product->id]);
         } else {
             if ($delta > 0 && $new > $product->stock) {
-                throw new \InvalidArgumentException('Cannot add more «'.$product->name.'». Stock: '.$product->stock.'.');
+                throw new \InvalidArgumentException('Only '.$product->stock.' left for '.$product->name.'.');
             }
             $lines[$product->id] = $new;
         }

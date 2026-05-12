@@ -26,7 +26,7 @@ class TelegramOrderBot
 
     private const BTN_PLACE_ORDER = 'Place order';
 
-    private const BTN_ORDER_REPORTS = 'Order reports (Excel)';
+    private const BTN_ORDER_REPORTS = 'Export orders';
 
     public function __construct(
         private readonly CheckoutOrderService $checkoutOrderService,
@@ -77,7 +77,7 @@ class TelegramOrderBot
             if (! $this->telegramUserIsStaff($from)) {
                 Telegram::sendMessage([
                     'chat_id' => $chatId,
-                    'text' => 'Unknown command. Tap «'.self::BTN_HELP.'» for what you can do here.',
+                    'text' => 'That isn’t available here. Open Help for what you can do.',
                     'reply_markup' => $this->replyKeyboardMarkup($user),
                 ]);
 
@@ -86,7 +86,7 @@ class TelegramOrderBot
 
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'Your Telegram user id: <code>'.$from->id.'</code>',
+                'text' => 'Your Telegram user ID: <code>'.$from->id.'</code>',
                 'parse_mode' => 'HTML',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]);
@@ -98,7 +98,7 @@ class TelegramOrderBot
             if (! $this->telegramUserIsStaff($from)) {
                 Telegram::sendMessage([
                     'chat_id' => $chatId,
-                    'text' => 'Unknown command. Tap «'.self::BTN_HELP.'» for what you can do here.',
+                    'text' => 'That isn’t available here. Open Help for what you can do.',
                     'reply_markup' => $this->replyKeyboardMarkup($user),
                 ]);
 
@@ -113,7 +113,7 @@ class TelegramOrderBot
             if (! $this->telegramUserIsStaff($from)) {
                 Telegram::sendMessage([
                     'chat_id' => $chatId,
-                    'text' => 'Unknown command. Tap «'.self::BTN_HELP.'» for what you can do here.',
+                    'text' => 'That isn’t available here. Open Help for what you can do.',
                     'reply_markup' => $this->replyKeyboardMarkup($user),
                 ]);
 
@@ -148,7 +148,7 @@ class TelegramOrderBot
             strtolower(self::BTN_ORDER_REPORTS) => $this->sendOrderReportsPicker($chatId, $user, $from),
             default => Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'Use the menu buttons or tap /help for commands.',
+                'text' => 'Use the menu below, or open Help.',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]),
         };
@@ -261,7 +261,7 @@ class TelegramOrderBot
 
             if ($data === 'cl') {
                 $user->clearCart();
-                $this->safeEditMessage($chatId, (int) $messageId, 'Your cart has been emptied.', ['inline_keyboard' => []], $user);
+                $this->safeEditMessage($chatId, (int) $messageId, 'Your cart is empty.', ['inline_keyboard' => []], $user);
 
                 return;
             }
@@ -277,7 +277,7 @@ class TelegramOrderBot
                 );
                 Telegram::sendMessage([
                     'chat_id' => $chatId,
-                    'text' => 'Anything else?',
+                    'text' => 'Anything else we can help with?',
                     'reply_markup' => $this->replyKeyboardMarkup($user),
                 ]);
 
@@ -296,7 +296,7 @@ class TelegramOrderBot
             ]);
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'Something went wrong. Please try again in a moment.',
+                'text' => 'Something went wrong. Please try again.',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]);
         }
@@ -430,7 +430,7 @@ class TelegramOrderBot
             try {
                 Telegram::answerCallbackQuery([
                     'callback_query_id' => $callbackQueryId,
-                    'text' => 'Only staff can confirm delivery status.',
+                    'text' => 'You can’t update this order.',
                     'show_alert' => true,
                 ]);
             } catch (Throwable $e) {
@@ -445,7 +445,7 @@ class TelegramOrderBot
             try {
                 Telegram::answerCallbackQuery([
                     'callback_query_id' => $callbackQueryId,
-                    'text' => 'Order not found.',
+                    'text' => 'We couldn’t find that order.',
                     'show_alert' => true,
                 ]);
             } catch (Throwable $e) {
@@ -459,7 +459,7 @@ class TelegramOrderBot
             try {
                 Telegram::answerCallbackQuery([
                     'callback_query_id' => $callbackQueryId,
-                    'text' => 'This order was already marked ('.$order->status.').',
+                    'text' => 'This order was already updated.',
                     'show_alert' => true,
                 ]);
             } catch (Throwable $e) {
@@ -472,8 +472,7 @@ class TelegramOrderBot
         $order->update(['status' => 'on_the_way']);
 
         $customerChatId = (string) $order->telegramUser->telegram_id;
-        $customerText = 'Good news — your order #'.$order->id.' is on the way. '
-            .'Total '.$this->fmtMoney((string) $order->total).'. Thank you for your order!';
+        $customerText = 'Your order #'.$order->id.' is on its way. Total '.$this->fmtMoney((string) $order->total).'. Thanks for your order.';
 
         $customerReachable = true;
 
@@ -494,7 +493,7 @@ class TelegramOrderBot
         try {
             Telegram::answerCallbackQuery([
                 'callback_query_id' => $callbackQueryId,
-                'text' => $customerReachable ? 'Customer notified' : 'Saved — customer message could not be delivered.',
+                'text' => $customerReachable ? 'Buyer notified.' : 'Saved. We couldn’t message the buyer in this chat.',
                 'show_alert' => ! $customerReachable,
             ]);
         } catch (Throwable $e) {
@@ -505,8 +504,8 @@ class TelegramOrderBot
         $messageId = (int) $message->messageId;
         $original = (string) ($message->text ?? '');
         $suffix = $customerReachable
-            ? "\n\n✅ On the way — customer has been notified."
-            : "\n\n⚠️ Marked on the way — could not DM the customer (blocked bot or stopped chat).";
+            ? "\n\nOut for delivery · Buyer notified"
+            : "\n\nOut for delivery · Buyer message not delivered (they may need to open this bot)";
 
         try {
             Telegram::editMessageText([
@@ -536,21 +535,21 @@ class TelegramOrderBot
 
         $lines = [];
         foreach ($order->items as $item) {
-            $pName = $item->relationLoaded('product') && $item->product ? $item->product->name : 'unknown';
+            $pName = $item->relationLoaded('product') && $item->product ? $item->product->name : 'Line item';
             $lines[] = '• '.$pName.' × '.$item->qty.' @ '.$this->fmtMoney((string) $item->price);
         }
 
-        $who = ($order->telegramUser->name ?? 'Customer')
-            .' (@'.($order->telegramUser->username ?? 'none').')';
+        $who = ($order->telegramUser->name ?? 'Guest')
+            .($order->telegramUser->username ? ' (@'.$order->telegramUser->username.')' : '');
 
-        $text = "NEW ORDER #{$order->id}\n{$who}\n"
+        $text = 'New order #'.$order->id."\n".$who."\n"
             .'Total '.$this->fmtMoney((string) $order->total)."\n\n"
             .implode("\n", $lines)
-            ."\n\nTap when the order leaves:";
+            ."\n\nWhen it leaves, tap below:";
 
         $markup = json_encode([
             'inline_keyboard' => [
-                [['text' => '🛵 On the way (notify customer)', 'callback_data' => 'tw:'.$order->id]],
+                [['text' => 'Out for delivery', 'callback_data' => 'tw:'.$order->id]],
             ],
         ], JSON_THROW_ON_ERROR);
 
@@ -572,7 +571,7 @@ class TelegramOrderBot
                     'message' => $e->getMessage(),
                     'chat_id_raw' => $notifyChatId,
                     'order_id' => $order->id,
-                    'hint' => 'Configure TELEGRAM_ORDERS_NOTIFY_CHAT_ID (staff group) and ensure the bot can message customers. Staff should use the same Telegram username as TELEGRAM_ADMIN_USERNAMES or set TELEGRAM_ADMIN_USER_IDS.',
+                    'hint' => 'Verify notification targets and that the bot can reach buyers.',
                 ]);
             }
         }
@@ -589,8 +588,8 @@ class TelegramOrderBot
 
     private function orderConfirmedText(Order $order): string
     {
-        return 'Order #'.$order->id.' received. Total: '.$this->fmtMoney((string) $order->total)."\n"
-            .'Thank you — we will confirm shortly.';
+        return 'Order #'.$order->id.' is in. Total '.$this->fmtMoney((string) $order->total)."\n"
+            .'We’ll follow up shortly.';
     }
 
     private function checkoutFromKeyboard(string $chatId, TelegramUser $user): void
@@ -618,7 +617,7 @@ class TelegramOrderBot
             ]);
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'Could not complete the order right now. Please try again shortly.',
+                'text' => 'We couldn’t place that order. Try again in a moment.',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]);
         }
@@ -637,9 +636,7 @@ class TelegramOrderBot
     {
         Telegram::sendMessage([
             'chat_id' => $chatId,
-            'text' => "Welcome! Order here through this chat.\n\nTap «".self::BTN_BROWSE.'» to shop, '
-                .self::BTN_PLACE_ORDER.' when you are ready, or '
-                .self::BTN_CART.' to review lines first.',
+            'text' => "Hi — you can order right in this chat.\n\nUse Menu to browse, Cart to review, then Place order when you’re ready.",
             'reply_markup' => $this->replyKeyboardMarkup($user),
         ]);
     }
@@ -647,19 +644,23 @@ class TelegramOrderBot
     private function sendHelp(string $chatId, TelegramUser $user): void
     {
         $lines = [
-            '/start — home & keyboard',
-            '/menu — open the catalogue',
-            '/cart — show cart',
-            '/checkout — '.self::BTN_PLACE_ORDER.' (same as the keyboard button)',
-            '/orders — your recent orders',
-            '/clear — empty cart',
-            '/help — this message',
+            'Help',
+            '',
+            '/start — Home',
+            '/menu — Menu',
+            '/cart — Cart',
+            '/checkout — Place order (same as the button)',
+            '/orders — Order history',
+            '/clear — Empty cart',
+            '/help — Help',
         ];
 
         if ($this->telegramActorIsStaff($user)) {
             $lines[] = '';
-            $lines[] = 'Staff — order spreadsheet: tap «'.self::BTN_ORDER_REPORTS.'», or /export day|week|month, or /export YYYY-MM-DD YYYY-MM-DD';
-            $lines[] = 'Staff — your id (for server setup only): /myid';
+            $lines[] = 'Team';
+            $lines[] = '• '.self::BTN_ORDER_REPORTS.' — or /export day, week, month';
+            $lines[] = '• Custom range — /export YYYY-MM-DD YYYY-MM-DD';
+            $lines[] = '• /myid — Your Telegram user ID';
         }
 
         Telegram::sendMessage([
@@ -674,7 +675,7 @@ class TelegramOrderBot
         $user->clearCart();
         Telegram::sendMessage([
             'chat_id' => $chatId,
-            'text' => 'Cart cleared.',
+            'text' => 'Done. Your cart is empty.',
             'reply_markup' => $this->replyKeyboardMarkup($user),
         ]);
     }
@@ -740,14 +741,14 @@ class TelegramOrderBot
             $label = $p ? ($this->shortenInlineLabel($p->name).' × '.(int) $qty) : ('item #'.$pid.' × '.(int) $qty);
             $rows[] = [
                 [
-                    'text' => '🗑 '.$label,
+                    'text' => 'Remove · '.$label,
                     'callback_data' => 'rq:'.(int) $pid,
                 ],
             ];
         }
 
         $rows[] = [['text' => self::BTN_PLACE_ORDER, 'callback_data' => 'cf']];
-        $rows[] = [['text' => 'Clear cart', 'callback_data' => 'cl']];
+        $rows[] = [['text' => 'Empty cart', 'callback_data' => 'cl']];
 
         return $rows;
     }
@@ -757,7 +758,7 @@ class TelegramOrderBot
         $linesMap = $user->normalizedCartLines();
 
         if ($linesMap === []) {
-            return 'Your cart is empty. Try «'.self::BTN_BROWSE.'».';
+            return 'Nothing in your cart yet. Open Menu to add items.';
         }
 
         $products = Product::query()
@@ -781,11 +782,11 @@ class TelegramOrderBot
         }
 
         if ($chunks === []) {
-            return 'Your cart had only unavailable items — it was refreshed. Open '.self::BTN_BROWSE.'.';
+            return 'Some items are no longer available. Your cart was updated — open Menu to continue.';
         }
 
-        return "Your cart\n\n".implode("\n", $chunks)."\n\nSubtotal: ".$this->fmtMoney($subtotal)
-            ."\n\nTap «".self::BTN_PLACE_ORDER.'» here or on your keyboard.';
+        return "Cart\n\n".implode("\n", $chunks)."\n\nSubtotal ".$this->fmtMoney($subtotal)
+            ."\n\nUse Place order when you’re ready.";
     }
 
     private function sendOrderHistory(string $chatId, TelegramUser $user): void
@@ -800,7 +801,7 @@ class TelegramOrderBot
         if ($orders->isEmpty()) {
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'No orders yet. '.self::BTN_BROWSE.' to shop.',
+                'text' => 'No orders yet. Open Menu to get started.',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]);
 
@@ -844,7 +845,7 @@ class TelegramOrderBot
         $keyboard = [
             [['text' => 'Add (+1)', 'callback_data' => 'a:'.$productId]],
             [['text' => 'Remove (−1)', 'callback_data' => 'r:'.$productId]],
-            [['text' => 'View cart · '.self::BTN_PLACE_ORDER, 'callback_data' => 'vc']],
+            [['text' => 'Open cart', 'callback_data' => 'vc']],
             [['text' => 'Back to menu', 'callback_data' => 'l:'.$page]],
         ];
 
@@ -857,7 +858,7 @@ class TelegramOrderBot
         if (! $p) {
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'That item is no longer listed.',
+                'text' => 'That item isn’t available anymore.',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]);
 
@@ -873,7 +874,7 @@ class TelegramOrderBot
         $keyboard = [
             [['text' => 'Add (+1)', 'callback_data' => 'a:'.$productId]],
             [['text' => 'Remove (−1)', 'callback_data' => 'r:'.$productId]],
-            [['text' => 'View cart · '.self::BTN_PLACE_ORDER, 'callback_data' => 'vc']],
+            [['text' => 'Open cart', 'callback_data' => 'vc']],
             [['text' => 'Back to menu', 'callback_data' => 'l:'.$page]],
         ];
 
@@ -911,14 +912,14 @@ class TelegramOrderBot
     {
         $total = Product::query()->where('active', true)->count();
         if ($total === 0) {
-            return 'The menu has no active items yet. Please check again later.';
+            return 'Nothing on the menu right now. Check back soon.';
         }
 
         $per = config('ordering.menu_page_size', 5);
         $pages = max(1, (int) ceil($total / $per));
         $humanPage = min($pages, $page + 1);
 
-        return 'Menu • page '.$humanPage.' / '.$pages;
+        return 'Menu · Page '.$humanPage.' of '.$pages;
     }
 
     private function buildProductListKeyboard(int $page): array
@@ -964,7 +965,7 @@ class TelegramOrderBot
             $rows[] = $navRow;
         }
 
-        $rows[] = [['text' => 'View cart · '.self::BTN_PLACE_ORDER, 'callback_data' => 'vc']];
+        $rows[] = [['text' => 'Open cart', 'callback_data' => 'vc']];
 
         return $rows;
     }
@@ -1010,7 +1011,7 @@ class TelegramOrderBot
             ]);
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'Choose an action below:',
+                'text' => 'Here are your shortcuts:',
                 'reply_markup' => $this->replyKeyboardMarkup($actor),
             ]);
         }
@@ -1021,7 +1022,7 @@ class TelegramOrderBot
         if (! $this->telegramUserIsStaff($from)) {
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'That option is only available to staff.',
+                'text' => 'You don’t have access to exports.',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]);
 
@@ -1030,7 +1031,7 @@ class TelegramOrderBot
 
         Telegram::sendMessage([
             'chat_id' => $chatId,
-            'text' => 'Pick a preset, or send a custom range: /export YYYY-MM-DD YYYY-MM-DD',
+            'text' => 'Choose a period. For a custom range: /export 2026-01-01 2026-01-31',
             'reply_markup' => json_encode([
                 'inline_keyboard' => [
                     [
@@ -1053,7 +1054,7 @@ class TelegramOrderBot
             try {
                 Telegram::answerCallbackQuery([
                     'callback_query_id' => $callbackQueryId,
-                    'text' => 'Only staff can download order reports.',
+                    'text' => 'You don’t have access to this.',
                     'show_alert' => true,
                 ]);
             } catch (Throwable $e) {
@@ -1081,7 +1082,7 @@ class TelegramOrderBot
         if (! class_exists(\PhpOffice\PhpSpreadsheet\Spreadsheet::class)) {
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'Excel export is not available on this server yet (missing spreadsheet library). Ask your host to run: composer require phpoffice/phpspreadsheet',
+                'text' => 'Exports aren’t available at the moment. If this keeps happening, contact support.',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]);
 
@@ -1096,7 +1097,7 @@ class TelegramOrderBot
             Telegram::sendDocument([
                 'chat_id' => $chatId,
                 'document' => InputFile::create($path, $file['filename']),
-                'caption' => 'Orders export',
+                'caption' => 'Order export',
             ]);
         } catch (InvalidArgumentException $e) {
             Telegram::sendMessage([
@@ -1111,7 +1112,7 @@ class TelegramOrderBot
             ]);
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'Could not build the spreadsheet. Please try again later.',
+                'text' => 'That export didn’t go through. Try again shortly.',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]);
         } finally {

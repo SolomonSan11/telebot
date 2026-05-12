@@ -32,7 +32,7 @@ final class OrderExportDateRange
                 'label' => 'month_'.$now->format('Y-m'),
             ],
             'range' => self::parseRange($from, $to),
-            default => throw new InvalidArgumentException('period must be one of: day, week, month, range.'),
+            default => throw new InvalidArgumentException('Pick a supported time range and try again.'),
         };
     }
 
@@ -42,18 +42,18 @@ final class OrderExportDateRange
     private static function parseRange(?string $from, ?string $to): array
     {
         if ($from === null || $from === '' || $to === null || $to === '') {
-            throw new InvalidArgumentException('For period=range, both from and to are required (Y-m-d).');
+            throw new InvalidArgumentException('Choose a start date and an end date.');
         }
 
         try {
             $start = Carbon::parse($from)->startOfDay();
             $end = Carbon::parse($to)->endOfDay();
         } catch (\Throwable) {
-            throw new InvalidArgumentException('Invalid from or to date. Use Y-m-d.');
+            throw new InvalidArgumentException('Those dates couldn’t be read. Check the format and try again.');
         }
 
         if ($end->lt($start)) {
-            throw new InvalidArgumentException('End date must be on or after start date.');
+            throw new InvalidArgumentException('The end date should be on or after the start date.');
         }
 
         return [

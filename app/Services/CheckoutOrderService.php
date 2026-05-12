@@ -36,10 +36,10 @@ class CheckoutOrderService
                 $product = $products->get($pid);
 
                 if (! $product) {
-                    throw new InvalidArgumentException('A product in your cart is no longer available. Open «My Cart» to refresh.');
+                    throw new InvalidArgumentException('Something in your cart isn’t available anymore. Open Cart to refresh.');
                 }
                 if ($product->stock < $q) {
-                    throw new InvalidArgumentException("Not enough stock for «{$product->name}». Available: {$product->stock}.");
+                    throw new InvalidArgumentException('Only '.$product->stock.' left for '.$product->name.'. Update your cart and try again.');
                 }
 
                 $lineTotal = bcmul((string) $product->price, (string) $q, 2);

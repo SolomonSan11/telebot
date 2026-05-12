@@ -12,7 +12,7 @@ class VerifyAdminExportToken
     {
         $expected = config('admin.export_token');
         if (! is_string($expected) || $expected === '') {
-            abort(503, 'Admin exports are not configured (set ADMIN_EXPORT_TOKEN in .env).');
+            abort(503, 'Order exports aren’t available right now.');
         }
 
         $provided = (string) $request->query('token', '');
@@ -21,7 +21,7 @@ class VerifyAdminExportToken
         }
 
         if (! hash_equals($expected, $provided)) {
-            abort(403, 'Invalid or missing export token.');
+            abort(403, 'This link isn’t valid or has expired.');
         }
 
         return $next($request);
