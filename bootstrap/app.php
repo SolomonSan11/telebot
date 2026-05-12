@@ -14,6 +14,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'telegram.webhook.secret' => \App\Http\Middleware\VerifyTelegramWebhook::class,
+            'admin.export' => \App\Http\Middleware\VerifyAdminExportToken::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
