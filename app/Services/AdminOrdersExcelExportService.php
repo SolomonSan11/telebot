@@ -12,9 +12,48 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 class AdminOrdersExcelExportService
 {
     /**
+     * @return array{path: string, filename: string}
+     *
+     * @throws InvalidArgumentException
+     */
+    public function writeXlsxToTempFile(string $period, ?string $from = null, ?string $to = null): array
+    {
+        ['spreadsheet' => $spreadsheet, 'filename' => $filename] = $this->createWorkbook($period, $from, $to);
+        $path = sys_get_temp_dir().DIRECTORY_SEPARATOR.uniqid('orders_', true).'.xlsx';
+
+        try {
+            (new Xlsx($spreadsheet))->save($path);
+        } finally {
+            $spreadsheet->disconnectWorksheets();
+        }
+
+        return ['path' => $path, 'filename' => $filename];
+    }
+
+    /**
      * @throws InvalidArgumentException
      */
     public function buildForPeriod(string $period, ?string $from = null, ?string $to = null): StreamedResponse
+    {
+        ['spreadsheet' => $spreadsheet, 'filename' => $filename] = $this->createWorkbook($period, $from, $to);
+
+        return response()->streamDownload(function () use ($spreadsheet): void {
+            try {
+                (new Xlsx($spreadsheet))->save('php://output');
+            } finally {
+                $spreadsheet->disconnectWorksheets();
+            }
+        }, $filename, [
+            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ]);
+    }
+
+    /**
+     * @return array{spreadsheet: Spreadsheet, filename: string}
+     *
+     * @throws InvalidArgumentException
+     */
+    private function createWorkbook(string $period, ?string $from, ?string $to): array
     {
         $range = OrderExportDateRange::resolve($period, $from, $to);
 
@@ -70,13 +109,9 @@ class AdminOrdersExcelExportService
             $sheet->getColumnDimension($col)->setAutoSize(true);
         }
 
-        $filename = 'orders_'.$range['label'].'.xlsx';
-
-        return response()->streamDownload(function () use ($spreadsheet): void {
-            $writer = new Xlsx($spreadsheet);
-            $writer->save('php://output');
-        }, $filename, [
-            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        ]);
+        return [
+            'spreadsheet' => $spreadsheet,
+            'filename' => 'orders_'.$range['label'].'.xlsx',
+        ];
     }
 }
