@@ -7,6 +7,7 @@ use App\Models\Product;
 use App\Models\TelegramUser;
 use Illuminate\Support\Facades\Log;
 use InvalidArgumentException;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use Telegram\Bot\FileUpload\InputFile;
 use Telegram\Bot\Laravel\Facades\Telegram;
 use Telegram\Bot\Objects\Update;
@@ -57,15 +58,31 @@ class TelegramOrderBot
         }
 
         $chatId = (string) $chat->id;
+
+        $user = $this->upsertTelegramUser($from);
+        $user->purgeStaleCartProducts();
+        $user->refresh();
+
+        if ($user->awaiting_payment_proof_for_order_id && $this->messageContainsPayableImage($msg)) {
+            $this->forwardPaymentProofAndFinalize($chatId, $user, $msg);
+
+            return;
+        }
+
         $textRaw = $msg->text;
         $text = is_string($textRaw) ? trim($textRaw) : '';
 
         if ($text === '' || $text === '0') {
+            if ($user->awaiting_payment_proof_for_order_id) {
+                Telegram::sendMessage([
+                    'chat_id' => $chatId,
+                    'text' => 'Please send your payment receipt as a photo in this chat.',
+                    'reply_markup' => $this->replyKeyboardMarkup($user),
+                ]);
+            }
+
             return;
         }
-
-        $user = $this->upsertTelegramUser($from);
-        $user->purgeStaleCartProducts();
 
         if (preg_match('/^\/start(\s|$)/i', $text)) {
             $this->sendWelcome($chatId, $user);
@@ -138,6 +155,17 @@ class TelegramOrderBot
         }
 
         $norm = strtolower($text);
+
+        if ($this->conversationBlockedByAwaitingPaymentProof($user, $text, $norm)) {
+            Telegram::sendMessage([
+                'chat_id' => $chatId,
+                'text' => 'We’re still waiting for a payment screenshot (photo) for order #'.$user->awaiting_payment_proof_for_order_id.'. Send the image here, or open Help.',
+                'reply_markup' => $this->replyKeyboardMarkup($user),
+            ]);
+
+            return;
+        }
+
         match ($norm) {
             strtolower(self::BTN_BROWSE) => $this->sendBrowseMenuFresh($chatId, 0),
             strtolower(self::BTN_CART) => $this->sendCartSummary($chatId, $user),
@@ -267,7 +295,33 @@ class TelegramOrderBot
             }
 
             if ($data === 'cf') {
-                $order = $this->checkoutAndAlertStaff($user);
+                $user->refresh();
+                $linesMap = $user->normalizedCartLines();
+                if ($linesMap === []) {
+                    $this->safeEditMessage($chatId, (int) $messageId, 'Your cart is empty.', ['inline_keyboard' => []], $user);
+
+                    return;
+                }
+                $keyboard = [
+                    [
+                        ['text' => 'Cash', 'callback_data' => 'pay:cash'],
+                        ['text' => 'Online (KPay)', 'callback_data' => 'pay:online'],
+                    ],
+                ];
+                $this->safeEditMessage(
+                    $chatId,
+                    (int) $messageId,
+                    "Choose how you’ll pay:\n\n• Cash — pay when you receive your order.\n• Online — pay by KPay, then send a photo of your receipt.",
+                    ['inline_keyboard' => $keyboard],
+                    $user
+                );
+
+                return;
+            }
+
+            if (preg_match('/^pay:(cash|online)$/', $data, $m)) {
+                $method = $m[1];
+                $order = $this->checkoutAndAlertStaff($user, $method);
                 $this->safeEditMessage(
                     $chatId,
                     (int) $messageId,
@@ -275,6 +329,20 @@ class TelegramOrderBot
                     ['inline_keyboard' => []],
                     $user
                 );
+                if ($method === 'online') {
+                    $user->forceFill([
+                        'awaiting_payment_proof_for_order_id' => $order->id,
+                    ])->save();
+                    Telegram::sendMessage([
+                        'chat_id' => $chatId,
+                        'text' => $this->buildKpayPaymentInstructions($order),
+                        'reply_markup' => $this->replyKeyboardMarkup($user),
+                    ]);
+                } else {
+                    $user->forceFill([
+                        'awaiting_payment_proof_for_order_id' => null,
+                    ])->save();
+                }
                 Telegram::sendMessage([
                     'chat_id' => $chatId,
                     'text' => 'Anything else we can help with?',
@@ -348,8 +416,6 @@ class TelegramOrderBot
 
     /**
      * Telegram accepts integer chat ids for DMs; @username is unreliable. Prefer DB or getChat().
-     *
-     * @return string|int
      */
     private function resolveOrderNotifyChatTarget(string|int $raw): string|int
     {
@@ -543,6 +609,7 @@ class TelegramOrderBot
             .($order->telegramUser->username ? ' (@'.$order->telegramUser->username.')' : '');
 
         $text = 'New order #'.$order->id."\n".$who."\n"
+            .$this->orderPaymentSummaryLine($order)."\n"
             .'Total '.$this->fmtMoney((string) $order->total)."\n\n"
             .implode("\n", $lines)
             ."\n\nWhen it leaves, tap below:";
@@ -578,37 +645,56 @@ class TelegramOrderBot
     }
 
     /** @throws InvalidArgumentException */
-    private function checkoutAndAlertStaff(TelegramUser $customer): Order
+    private function checkoutAndAlertStaff(TelegramUser $customer, string $paymentMethod = 'cash'): Order
     {
-        $order = $this->checkoutOrderService->checkout($customer);
+        $order = $this->checkoutOrderService->checkout($customer, $paymentMethod);
         $this->notifyStaff($order);
 
         return $order->fresh(['items.product', 'telegramUser']);
     }
 
+    private function orderPaymentSummaryLine(Order $order): string
+    {
+        return ($order->payment_method ?? 'cash') === 'online'
+            ? 'Payment: Online (KPay) — customer will send a receipt photo in the bot chat.'
+            : 'Payment: Cash on delivery.';
+    }
+
     private function orderConfirmedText(Order $order): string
     {
-        return 'Order #'.$order->id.' is in. Total '.$this->fmtMoney((string) $order->total)."\n"
-            .'We’ll follow up shortly.';
+        $base = 'Order #'.$order->id.' is in. Total '.$this->fmtMoney((string) $order->total)."\n";
+
+        return ($order->payment_method ?? 'cash') === 'online'
+            ? $base."We’ll follow up shortly.\n\nNext: pay using the KPay details below, then send a photo of your receipt in this chat."
+            : $base.'We’ll follow up shortly.';
     }
 
     private function checkoutFromKeyboard(string $chatId, TelegramUser $user): void
     {
         $user->refresh();
-
-        try {
-            $order = $this->checkoutAndAlertStaff($user);
-
+        $linesMap = $user->normalizedCartLines();
+        if ($linesMap === []) {
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => $this->orderConfirmedText($order),
+                'text' => 'Your cart is empty. Open Menu to add something first.',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]);
-        } catch (InvalidArgumentException $e) {
+
+            return;
+        }
+
+        try {
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => $e->getMessage(),
-                'reply_markup' => $this->replyKeyboardMarkup($user),
+                'text' => "Choose how you’ll pay:\n\n• Cash — pay when you receive your order.\n• Online — pay by KPay, then send a photo of your receipt.",
+                'reply_markup' => json_encode([
+                    'inline_keyboard' => [
+                        [
+                            ['text' => 'Cash', 'callback_data' => 'pay:cash'],
+                            ['text' => 'Online (KPay)', 'callback_data' => 'pay:online'],
+                        ],
+                    ],
+                ], JSON_THROW_ON_ERROR),
             ]);
         } catch (Throwable $e) {
             Log::error('telegram_order_checkout_keyboard', [
@@ -617,7 +703,7 @@ class TelegramOrderBot
             ]);
             Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => 'We couldn’t place that order. Try again in a moment.',
+                'text' => 'We couldn’t show payment options. Try again in a moment.',
                 'reply_markup' => $this->replyKeyboardMarkup($user),
             ]);
         }
@@ -649,7 +735,7 @@ class TelegramOrderBot
             '/start — Home',
             '/menu — Menu',
             '/cart — Cart',
-            '/checkout — Place order (same as the button)',
+            '/checkout — Place order (pick cash vs online next)',
             '/orders — Order history',
             '/clear — Empty cart',
             '/help — Help',
@@ -815,7 +901,11 @@ class TelegramOrderBot
                 $n = $item->relationLoaded('product') && $item->product ? $item->product->name : '#'.$item->product_id;
                 $tiny[] = $n.' × '.$item->qty;
             }
-            $parts[] = '#'.$order->id.' • '.$order->status.' • '.$this->fmtMoney((string) $order->total)
+            $pay = ($order->payment_method ?? 'cash') === 'online' ? 'online' : 'cash';
+            $proof = ($order->payment_method ?? 'cash') === 'online' && ! $order->payment_proof_received_at
+                ? ' · receipt pending'
+                : '';
+            $parts[] = '#'.$order->id.' • '.$order->status.' • '.$pay.$proof.' • '.$this->fmtMoney((string) $order->total)
                 ."\n".implode(', ', $tiny);
         }
 
@@ -1079,7 +1169,7 @@ class TelegramOrderBot
 
     private function sendStaffExcelExport(string $chatId, TelegramUser $user, string $period, ?string $rangeFrom = null, ?string $rangeTo = null): void
     {
-        if (! class_exists(\PhpOffice\PhpSpreadsheet\Spreadsheet::class)) {
+        if (! class_exists(Spreadsheet::class)) {
             Telegram::sendMessage([
                 'chat_id' => $chatId,
                 'text' => 'Exports aren’t available at the moment. If this keeps happening, contact support.',
@@ -1120,6 +1210,142 @@ class TelegramOrderBot
                 @unlink($path);
             }
         }
+    }
+
+    private function buildKpayPaymentInstructions(Order $order): string
+    {
+        $name = (string) config('ordering.kpay_display_name');
+        $number = (string) config('ordering.kpay_display_number');
+        $total = $this->fmtMoney((string) $order->total);
+
+        return "Pay with KPay (order #{$order->id})\n\n"
+            ."Amount: {$total}\n"
+            ."KPay name: {$name}\n"
+            ."KPay number: {$number}\n\n"
+            .'After paying, send a clear photo of your receipt here in this chat.';
+    }
+
+    private function messageContainsPayableImage($msg): bool
+    {
+        if ($msg->offsetExists('photo')) {
+            $raw = $msg->get('photo');
+            if (is_array($raw) && $raw !== []) {
+                return true;
+            }
+            if ($raw instanceof \Countable && count($raw) > 0) {
+                return true;
+            }
+        }
+
+        if (! $msg->offsetExists('document')) {
+            return false;
+        }
+
+        $doc = $msg->document;
+        if (! $doc) {
+            return false;
+        }
+
+        $mime = $doc->mimeType ?? null;
+
+        return is_string($mime) && str_starts_with($mime, 'image/');
+    }
+
+    private function forwardPaymentProofAndFinalize(string $chatId, TelegramUser $user, $msg): void
+    {
+        $orderId = (int) $user->awaiting_payment_proof_for_order_id;
+        if ($orderId <= 0) {
+            return;
+        }
+
+        $order = Order::query()
+            ->whereKey($orderId)
+            ->where('telegram_user_id', $user->id)
+            ->first();
+
+        if (! $order || ($order->payment_method ?? 'cash') !== 'online') {
+            $user->forceFill(['awaiting_payment_proof_for_order_id' => null])->save();
+
+            return;
+        }
+
+        if ($order->payment_proof_received_at) {
+            $user->forceFill(['awaiting_payment_proof_for_order_id' => null])->save();
+            Telegram::sendMessage([
+                'chat_id' => $chatId,
+                'text' => 'We already received a payment photo for order #'.$order->id.'. No need to send another.',
+                'reply_markup' => $this->replyKeyboardMarkup($user),
+            ]);
+
+            return;
+        }
+
+        $messageId = (int) $msg->messageId;
+        $recipients = $this->orderAlertRecipientChatIds();
+
+        if ($recipients === []) {
+            Log::warning('telegram_payment_proof_notify_skipped', [
+                'order_id' => $order->id,
+                'reason' => 'no notify chat ids',
+            ]);
+        }
+
+        foreach ($recipients as $raw) {
+            try {
+                $target = $this->resolveOrderNotifyChatTarget($raw);
+                Telegram::forwardMessage([
+                    'chat_id' => $target,
+                    'from_chat_id' => $chatId,
+                    'message_id' => $messageId,
+                ]);
+            } catch (Throwable $e) {
+                Log::warning('telegram_payment_proof_forward_failed', [
+                    'message' => $e->getMessage(),
+                    'order_id' => $order->id,
+                    'to_raw' => $raw,
+                ]);
+            }
+        }
+
+        $order->forceFill(['payment_proof_received_at' => now()])->save();
+        $user->forceFill(['awaiting_payment_proof_for_order_id' => null])->save();
+
+        $thanks = $recipients === []
+            ? 'Thanks — we saved your payment photo. If nothing moves shortly, message us here.'
+            : 'Thanks — we’ve forwarded your payment photo to the team for order #'.$order->id.'.';
+
+        Telegram::sendMessage([
+            'chat_id' => $chatId,
+            'text' => $thanks,
+            'reply_markup' => $this->replyKeyboardMarkup($user),
+        ]);
+    }
+
+    private function conversationBlockedByAwaitingPaymentProof(TelegramUser $user, string $text, string $norm): bool
+    {
+        if (! $user->awaiting_payment_proof_for_order_id) {
+            return false;
+        }
+
+        if (preg_match('/^\/(start|help|menu|cart|orders|clear|checkout)(\s|$)/i', $text)) {
+            return false;
+        }
+
+        if (preg_match('/^\/(export|myid)\b/i', $text)) {
+            return false;
+        }
+
+        $allowedReplies = [
+            strtolower(self::BTN_BROWSE),
+            strtolower(self::BTN_CART),
+            strtolower(self::BTN_CLEAR),
+            strtolower(self::BTN_ORDERS),
+            strtolower(self::BTN_HELP),
+            strtolower(self::BTN_PLACE_ORDER),
+            strtolower(self::BTN_ORDER_REPORTS),
+        ];
+
+        return ! in_array($norm, $allowedReplies, true);
     }
 
     private function fmtMoney(string $amount): string

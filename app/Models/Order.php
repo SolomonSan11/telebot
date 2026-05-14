@@ -8,12 +8,19 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Order extends Model
 {
-    protected $fillable = ['telegram_user_id', 'total', 'status'];
+    protected $fillable = [
+        'telegram_user_id',
+        'total',
+        'status',
+        'payment_method',
+        'payment_proof_received_at',
+    ];
 
     protected function casts(): array
     {
         return [
             'total' => 'decimal:2',
+            'payment_proof_received_at' => 'datetime',
         ];
     }
 

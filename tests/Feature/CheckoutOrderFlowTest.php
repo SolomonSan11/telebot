@@ -47,6 +47,29 @@ class CheckoutOrderFlowTest extends TestCase
         $this->assertSame([], $user->normalizedCartLines());
     }
 
+    public function test_checkout_persists_online_payment_method(): void
+    {
+        $p = Product::query()->create([
+            'name' => 'Widget',
+            'description' => null,
+            'price' => '5.00',
+            'stock' => 2,
+            'active' => true,
+        ]);
+
+        $user = TelegramUser::query()->create([
+            'telegram_id' => 90010,
+            'name' => 'Payer',
+            'username' => 'payer',
+            'shopping_cart' => [(string) $p->id => 1],
+        ]);
+
+        $order = app(CheckoutOrderService::class)->checkout($user, 'online');
+
+        $this->assertSame('online', $order->payment_method);
+        $this->assertNull($order->payment_proof_received_at);
+    }
+
     public function test_checkout_rejects_empty_cart(): void
     {
         $user = TelegramUser::query()->create([

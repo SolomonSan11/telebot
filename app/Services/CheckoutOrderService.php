@@ -11,15 +11,19 @@ use InvalidArgumentException;
 
 class CheckoutOrderService
 {
-    public function checkout(TelegramUser $customer): Order
+    public function checkout(TelegramUser $customer, string $paymentMethod = 'cash'): Order
     {
+        if (! in_array($paymentMethod, ['cash', 'online'], true)) {
+            throw new InvalidArgumentException('Invalid payment method.');
+        }
+
         $lines = $customer->normalizedCartLines();
 
         if ($lines === []) {
             throw new InvalidArgumentException('Your cart is empty.');
         }
 
-        return DB::transaction(function () use ($customer, $lines) {
+        return DB::transaction(function () use ($customer, $lines, $paymentMethod) {
             $products = Product::query()
                 ->whereIn('id', array_keys($lines))
                 ->where('active', true)
@@ -55,6 +59,7 @@ class CheckoutOrderService
                 'telegram_user_id' => $customer->id,
                 'total' => $total,
                 'status' => 'pending',
+                'payment_method' => $paymentMethod,
             ]);
 
             foreach ($prepared as [$product, $q]) {

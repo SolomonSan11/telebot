@@ -12,6 +12,7 @@ class TelegramUser extends Model
         'name',
         'username',
         'shopping_cart',
+        'awaiting_payment_proof_for_order_id',
     ];
 
     protected function casts(): array
